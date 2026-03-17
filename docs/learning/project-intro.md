@@ -96,10 +96,11 @@
 1. **先跑起来**：按「六」完成安装、入驻、`gateway:watch`，用 WebChat 或 CLI 发几条消息。
 2. **理解数据流**：从「某条通道收到消息」→ Gateway 路由 → Agent 处理 → 回复回通道，在 `src/channels/`、`src/gateway/`、`src/agents/` 里顺一条链路。
 3. **后端执行与智能体**（不关注渠道时可优先看）：每条请求如何入队、大模型如何调工具跑代码、不同问题/会话如何隔离、智能体之间如何通信，见 **[后端执行与智能体](backend-execution-and-agents.md)**。
-4. **看配置与 CLI**：`src/config/`、`src/cli/`，配合 `openclaw onboard` 和 `openclaw doctor` 理解配置与健康检查。
-5. **看一个通道**：任选一个你熟悉的渠道（如 Telegram 或 Discord），在 `src/channels/` 或 `extensions/` 里看完「连接 → 收消息 → 发回」。
-6. **看 Agent 与工具**：`src/agents/` 里 Pi RPC、工具注册与调用、流式输出。
-7. **按需深入**：Canvas、Voice、Cron、Skills、插件 SDK 等，结合 [docs.openclaw.ai](https://docs.openclaw.ai) 对应章节。
+4. **Pi Agent 深入**：Pi 运行时的文件地图、5 条关键路径（完整 run、exec 执行、Agent 间通信、compaction、事件推送），见 **[Pi Agent 深入](pi-agent-deep-dive.md)**。
+5. **看配置与 CLI**：`src/config/`、`src/cli/`，配合 `openclaw onboard` 和 `openclaw doctor` 理解配置与健康检查。
+6. **看一个通道**：任选一个你熟悉的渠道（如 Telegram 或 Discord），在 `src/channels/` 或 `extensions/` 里看完「连接 → 收消息 → 发回」。
+7. **看 Agent 与工具**：`src/agents/` 里 Pi RPC、工具注册与调用、流式输出。
+8. **按需深入**：Canvas、Voice、Cron、Skills、插件 SDK 等，结合 [docs.openclaw.ai](https://docs.openclaw.ai) 对应章节。
 
 ---
 
