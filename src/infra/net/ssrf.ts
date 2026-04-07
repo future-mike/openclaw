@@ -13,13 +13,19 @@ import {
   parseLooseIpAddress,
 } from "../../shared/net/ip.js";
 import { normalizeHostname } from "./hostname.js";
-import { loadUndiciRuntimeDeps } from "./undici-runtime.js";
+import {
+  createHttp1Agent,
+  createHttp1EnvHttpProxyAgent,
+  createHttp1ProxyAgent,
+} from "./undici-runtime.js";
 
 type LookupCallback = (
   err: NodeJS.ErrnoException | null,
   address: string | LookupAddress[],
   family?: number,
 ) => void;
+
+type LookupResult = LookupAddress | LookupAddress[];
 
 export class SsrFBlockedError extends Error {
   constructor(message: string) {
@@ -200,6 +206,13 @@ function assertAllowedResolvedAddressesOrThrow(
   }
 }
 
+function normalizeLookupResults(results: LookupResult): readonly LookupAddress[] {
+  if (Array.isArray(results)) {
+    return results;
+  }
+  return [results];
+}
+
 export function createPinnedLookup(params: {
   hostname: string;
   addresses: string[];
@@ -286,6 +299,7 @@ export type PinnedDispatcherPolicy =
   | {
       mode: "explicit-proxy";
       proxyUrl: string;
+      allowPrivateProxy?: boolean;
       proxyTls?: Record<string, unknown>;
       pinnedHostname?: PinnedHostnameOverride;
     };
@@ -330,7 +344,9 @@ export async function resolvePinnedHostnameWithPolicy(
   }
 
   const lookupFn = params.lookupFn ?? dnsLookup;
-  const results = await lookupFn(normalized, { all: true });
+  const results = normalizeLookupResults(
+    (await lookupFn(normalized, { all: true })) as LookupResult,
+  );
   if (results.length === 0) {
     throw new Error(`Unable to resolve hostname: ${hostname}`);
   }
@@ -401,29 +417,32 @@ export function createPinnedDispatcher(
   policy?: PinnedDispatcherPolicy,
   ssrfPolicy?: SsrFPolicy,
 ): Dispatcher {
-  const { Agent, EnvHttpProxyAgent, ProxyAgent } = loadUndiciRuntimeDeps();
   const lookup = resolvePinnedDispatcherLookup(pinned, policy?.pinnedHostname, ssrfPolicy);
 
   if (!policy || policy.mode === "direct") {
-    return new Agent({
+    return createHttp1Agent({
       connect: withPinnedLookup(lookup, policy?.connect),
     });
   }
 
   if (policy.mode === "env-proxy") {
-    return new EnvHttpProxyAgent({
+    return createHttp1EnvHttpProxyAgent({
       connect: withPinnedLookup(lookup, policy.connect),
       ...(policy.proxyTls ? { proxyTls: { ...policy.proxyTls } } : {}),
     });
   }
 
   const proxyUrl = policy.proxyUrl.trim();
-  if (!policy.proxyTls) {
-    return new ProxyAgent(proxyUrl);
+  const requestTls = withPinnedLookup(lookup, policy.proxyTls);
+  if (!requestTls) {
+    return createHttp1ProxyAgent({ uri: proxyUrl });
   }
-  return new ProxyAgent({
+  return createHttp1ProxyAgent({
     uri: proxyUrl,
-    proxyTls: { ...policy.proxyTls },
+    // `PinnedDispatcherPolicy.proxyTls` historically carried target-hop
+    // transport hints for explicit proxies. Translate that to undici's
+    // `requestTls` so HTTPS proxy tunnels keep the pinned DNS lookup.
+    requestTls,
   });
 }
 

@@ -1,14 +1,14 @@
 import path from "node:path";
-import type { SessionBindingAdapter } from "openclaw/plugin-sdk/conversation-runtime";
+import { readJsonFileWithFallback, writeJsonFileAtomically } from "openclaw/plugin-sdk/json-store";
+import { resolveAgentIdFromSessionKey } from "openclaw/plugin-sdk/routing";
+import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
 import {
-  readJsonFileWithFallback,
   registerSessionBindingAdapter,
-  resolveAgentIdFromSessionKey,
   resolveThreadBindingFarewellText,
+  type SessionBindingAdapter,
   unregisterSessionBindingAdapter,
-  writeJsonFileAtomically,
-} from "../runtime-api.js";
-import { resolveMatrixStoragePaths } from "./client/storage.js";
+} from "openclaw/plugin-sdk/thread-bindings-runtime";
+import { claimCurrentTokenStorageState, resolveMatrixStateFilePath } from "./client/storage.js";
 import type { MatrixAuth } from "./client/types.js";
 import type { MatrixClient } from "./sdk.js";
 import { sendMessageMatrix } from "./send.js";
@@ -40,7 +40,7 @@ type StoredMatrixThreadBindingState = {
   bindings: MatrixThreadBindingRecord[];
 };
 
-function normalizeDurationMs(raw: unknown, fallback: number): number {
+function _normalizeDurationMs(raw: unknown, fallback: number): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) {
     return fallback;
   }
@@ -62,16 +62,13 @@ function resolveBindingsPath(params: {
   env?: NodeJS.ProcessEnv;
   stateDir?: string;
 }): string {
-  const storagePaths = resolveMatrixStoragePaths({
-    homeserver: params.auth.homeserver,
-    userId: params.auth.userId,
-    accessToken: params.auth.accessToken,
+  return resolveMatrixStateFilePath({
+    auth: params.auth,
     accountId: params.accountId,
-    deviceId: params.auth.deviceId,
     env: params.env,
     stateDir: params.stateDir,
+    filename: "thread-bindings.json",
   });
-  return path.join(storagePaths.rootDir, "thread-bindings.json");
 }
 
 async function loadBindingsFromDisk(filePath: string, accountId: string) {
@@ -127,7 +124,7 @@ function toStoredBindingsState(
 ): StoredMatrixThreadBindingState {
   return {
     version: STORE_VERSION,
-    bindings: [...bindings].sort((a, b) => a.boundAt - b.boundAt),
+    bindings: [...bindings].toSorted((a, b) => a.boundAt - b.boundAt),
   };
 }
 
@@ -136,6 +133,9 @@ async function persistBindingsSnapshot(
   bindings: MatrixThreadBindingRecord[],
 ): Promise<void> {
   await writeJsonFileAtomically(filePath, toStoredBindingsState(bindings));
+  claimCurrentTokenStorageState({
+    rootDir: path.dirname(filePath),
+  });
 }
 
 function buildMatrixBindingIntroText(params: {
@@ -421,7 +421,7 @@ export async function createMatrixThreadBindingManager(params: {
     capabilities: { placements: ["current", "child"], bindSupported: true, unbindSupported: true },
     bind: async (input) => {
       const conversationId = input.conversation.conversationId.trim();
-      const parentConversationId = input.conversation.parentConversationId?.trim() || undefined;
+      const parentConversationId = normalizeOptionalString(input.conversation.parentConversationId);
       const targetSessionKey = input.targetSessionKey.trim();
       if (!conversationId || !targetSessionKey) {
         return null;

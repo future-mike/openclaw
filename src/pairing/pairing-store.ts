@@ -9,6 +9,7 @@ import { withFileLock as withPathLock } from "../infra/file-lock.js";
 import { resolveRequiredHomeDir } from "../infra/home-dir.js";
 import { readJsonFileWithFallback, writeJsonFileAtomically } from "../plugin-sdk/json-store.js";
 import { DEFAULT_ACCOUNT_ID } from "../routing/session-key.js";
+import { normalizeOptionalString } from "../shared/string-coerce.js";
 
 const PAIRING_CODE_LENGTH = 8;
 const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -193,12 +194,44 @@ function resolveLastSeenAt(entry: PairingRequest): number {
   return parseTimestamp(entry.lastSeenAt) ?? parseTimestamp(entry.createdAt) ?? 0;
 }
 
-function pruneExcessRequests(reqs: PairingRequest[], maxPending: number) {
+function resolvePairingRequestAccountId(entry: PairingRequest): string {
+  return normalizePairingAccountId(String(entry.meta?.accountId ?? "")) || DEFAULT_ACCOUNT_ID;
+}
+
+function pruneExcessRequestsByAccount(reqs: PairingRequest[], maxPending: number) {
   if (maxPending <= 0 || reqs.length <= maxPending) {
     return { requests: reqs, removed: false };
   }
-  const sorted = reqs.slice().toSorted((a, b) => resolveLastSeenAt(a) - resolveLastSeenAt(b));
-  return { requests: sorted.slice(-maxPending), removed: true };
+  const grouped = new Map<string, number[]>();
+  for (const [index, entry] of reqs.entries()) {
+    const accountId = resolvePairingRequestAccountId(entry);
+    const current = grouped.get(accountId);
+    if (current) {
+      current.push(index);
+      continue;
+    }
+    grouped.set(accountId, [index]);
+  }
+
+  const droppedIndexes = new Set<number>();
+  for (const indexes of grouped.values()) {
+    if (indexes.length <= maxPending) {
+      continue;
+    }
+    const sortedIndexes = indexes
+      .slice()
+      .toSorted((left, right) => resolveLastSeenAt(reqs[left]) - resolveLastSeenAt(reqs[right]));
+    for (const index of sortedIndexes.slice(0, sortedIndexes.length - maxPending)) {
+      droppedIndexes.add(index);
+    }
+  }
+  if (droppedIndexes.size === 0) {
+    return { requests: reqs, removed: false };
+  }
+  return {
+    requests: reqs.filter((_, index) => !droppedIndexes.has(index)),
+    removed: true,
+  };
 }
 
 function randomCode(): string {
@@ -229,11 +262,7 @@ function requestMatchesAccountId(entry: PairingRequest, normalizedAccountId: str
   if (!normalizedAccountId) {
     return true;
   }
-  return (
-    String(entry.meta?.accountId ?? "")
-      .trim()
-      .toLowerCase() === normalizedAccountId
-  );
+  return resolvePairingRequestAccountId(entry) === normalizedAccountId;
 }
 
 function shouldIncludeLegacyAllowFromEntries(normalizedAccountId: string): boolean {
@@ -666,7 +695,7 @@ export async function listChannelPairingRequests(
     async () => {
       const { requests: prunedExpired, removed: expiredRemoved } =
         await readPrunedPairingRequests(filePath);
-      const { requests: pruned, removed: cappedRemoved } = pruneExcessRequests(
+      const { requests: pruned, removed: cappedRemoved } = pruneExcessRequestsByAccount(
         prunedExpired,
         PAIRING_PENDING_MAX,
       );
@@ -757,7 +786,7 @@ export async function upsertChannelPairingRequest(params: {
           meta: meta ?? existing?.meta,
         };
         reqs[existingIdx] = next;
-        const { requests: capped } = pruneExcessRequests(reqs, PAIRING_PENDING_MAX);
+        const { requests: capped } = pruneExcessRequestsByAccount(reqs, PAIRING_PENDING_MAX);
         await writeJsonFile(filePath, {
           version: 1,
           requests: capped,
@@ -765,12 +794,15 @@ export async function upsertChannelPairingRequest(params: {
         return { code, created: false };
       }
 
-      const { requests: capped, removed: cappedRemoved } = pruneExcessRequests(
+      const { requests: capped, removed: cappedRemoved } = pruneExcessRequestsByAccount(
         reqs,
         PAIRING_PENDING_MAX,
       );
       reqs = capped;
-      if (PAIRING_PENDING_MAX > 0 && reqs.length >= PAIRING_PENDING_MAX) {
+      const accountRequestCount = reqs.filter((r) =>
+        requestMatchesAccountId(r, normalizedMatchingAccountId),
+      ).length;
+      if (PAIRING_PENDING_MAX > 0 && accountRequestCount >= PAIRING_PENDING_MAX) {
         if (expiredRemoved || cappedRemoved) {
           await writeJsonFile(filePath, {
             version: 1,
@@ -839,11 +871,11 @@ export async function approveChannelPairingCode(params: {
         version: 1,
         requests: pruned,
       } satisfies PairingStore);
-      const entryAccountId = String(entry.meta?.accountId ?? "").trim() || undefined;
+      const entryAccountId = normalizeOptionalString(String(entry.meta?.accountId ?? ""));
       await addChannelAllowFromStoreEntry({
         channel: params.channel,
         entry: entry.id,
-        accountId: params.accountId?.trim() || entryAccountId,
+        accountId: normalizeOptionalString(params.accountId) ?? entryAccountId,
         env,
       });
       return { id: entry.id, entry };

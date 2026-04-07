@@ -12,13 +12,15 @@ import {
   readChannelAllowFromStore,
   removeChannelAllowFromStoreEntry,
 } from "../../pairing/pairing-store.js";
-import {
-  DEFAULT_ACCOUNT_ID,
-  normalizeAccountId,
-  normalizeOptionalAccountId,
-} from "../../routing/session-key.js";
+import { DEFAULT_ACCOUNT_ID, normalizeOptionalAccountId } from "../../routing/session-key.js";
+import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { normalizeStringEntries } from "../../shared/string-normalization.js";
-import { rejectUnauthorizedCommand, requireCommandFlagEnabled } from "./command-gates.js";
+import {
+  rejectNonOwnerCommand,
+  rejectUnauthorizedCommand,
+  requireCommandFlagEnabled,
+  requireGatewayClientScopeForInternalChannel,
+} from "./command-gates.js";
 import type { CommandHandler } from "./commands-types.js";
 import { resolveConfigWriteDeniedText } from "./config-write-authorization.js";
 
@@ -52,6 +54,24 @@ type AllowlistCommand =
 
 const ACTIONS = new Set(["list", "add", "remove"]);
 const SCOPES = new Set<AllowlistScope>(["dm", "group", "all"]);
+
+function resolveAllowlistAccountId(params: {
+  cfg: OpenClawConfig;
+  channelId: ChannelId;
+  parsedAccount?: string;
+  ctxAccountId?: string;
+}): string {
+  const explicitAccountId = normalizeOptionalAccountId(params.parsedAccount);
+  if (explicitAccountId) {
+    return explicitAccountId;
+  }
+  const plugin = getChannelPlugin(params.channelId);
+  const configuredDefaultAccountId = normalizeOptionalString(
+    plugin?.config.defaultAccountId?.(params.cfg),
+  );
+  const ctxAccountId = normalizeOptionalAccountId(params.ctxAccountId);
+  return configuredDefaultAccountId || ctxAccountId || DEFAULT_ACCOUNT_ID;
+}
 
 function parseAllowlistCommand(raw: string): AllowlistCommand | null {
   const trimmed = raw.trim();
@@ -109,8 +129,8 @@ function parseAllowlistCommand(raw: string): AllowlistCommand | null {
     }
     const kv = token.split("=");
     if (kv.length === 2) {
-      const key = kv[0]?.trim().toLowerCase();
-      const value = kv[1]?.trim();
+      const key = normalizeOptionalString(kv[0])?.toLowerCase();
+      const value = normalizeOptionalString(kv[1]);
       if (key === "channel") {
         if (value) {
           channel = value;
@@ -263,7 +283,7 @@ export const handleAllowlistCommand: CommandHandler = async (params, allowTextCo
       reply: { text: "⚠️ Unknown channel. Add channel=<id> to the command." },
     };
   }
-  if (parsed.account?.trim() && !normalizeOptionalAccountId(parsed.account)) {
+  if (normalizeOptionalString(parsed.account) && !normalizeOptionalAccountId(parsed.account)) {
     return {
       shouldContinue: false,
       reply: {
@@ -271,7 +291,12 @@ export const handleAllowlistCommand: CommandHandler = async (params, allowTextCo
       },
     };
   }
-  const accountId = normalizeAccountId(parsed.account ?? params.ctx.AccountId);
+  const accountId = resolveAllowlistAccountId({
+    cfg: params.cfg,
+    channelId,
+    parsedAccount: parsed.account,
+    ctxAccountId: params.ctx.AccountId,
+  });
   const plugin = getChannelPlugin(channelId);
 
   if (parsed.action === "list") {
@@ -383,6 +408,20 @@ export const handleAllowlistCommand: CommandHandler = async (params, allowTextCo
     return { shouldContinue: false, reply: { text: lines.join("\n") } };
   }
 
+  const nonOwner = rejectNonOwnerCommand(params, "/allowlist");
+  if (nonOwner) {
+    return nonOwner;
+  }
+
+  const missingAdminScope = requireGatewayClientScopeForInternalChannel(params, {
+    label: "/allowlist write",
+    allowedScopes: ["operator.admin"],
+    missingText: "❌ /allowlist add|remove requires operator.admin for gateway clients.",
+  });
+  if (missingAdminScope) {
+    return missingAdminScope;
+  }
+
   const disabled = requireCommandFlagEnabled(params.cfg, {
     label: "/allowlist edits",
     configKey: "config",
@@ -445,7 +484,7 @@ export const handleAllowlistCommand: CommandHandler = async (params, allowTextCo
       cfg: params.cfg,
       channel: params.command.channel,
       channelId,
-      accountId: params.ctx.AccountId,
+      accountId,
       gatewayClientScopes: params.ctx.GatewayClientScopes,
       target: editResult.writeTarget,
     });

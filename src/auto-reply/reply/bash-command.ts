@@ -1,11 +1,12 @@
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
-import { getFinishedSession, getSession, markExited } from "../../agents/bash-process-registry.js";
+import { getFinishedSession, getSession } from "../../agents/bash-process-registry.js";
 import { createExecTool } from "../../agents/bash-tools.js";
 import { resolveSandboxRuntimeStatus } from "../../agents/sandbox.js";
-import { killProcessTree } from "../../agents/shell-utils.js";
 import { isCommandFlagEnabled } from "../../config/commands.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { logVerbose } from "../../globals.js";
+import { formatErrorMessage } from "../../infra/errors.js";
+import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { clampInt } from "../../utils.js";
 import type { MsgContext } from "../templating.js";
 import type { ReplyPayload } from "../types.js";
@@ -82,8 +83,8 @@ function parseBashRequest(raw: string): BashRequest | null {
     return { action: "help" };
   }
   const tokenMatch = rest.match(/^(\S+)(?:\s+([\s\S]+))?$/);
-  const token = tokenMatch?.[1]?.trim() ?? "";
-  const remainder = tokenMatch?.[2]?.trim() ?? "";
+  const token = normalizeOptionalString(tokenMatch?.[1]) ?? "";
+  const remainder = normalizeOptionalString(tokenMatch?.[2]) ?? "";
   const lowered = token.toLowerCase();
   if (lowered === "poll") {
     return { action: "poll", sessionId: remainder || undefined };
@@ -236,7 +237,8 @@ export async function handleBashChatCommand(params: {
 
   if (request.action === "poll") {
     const sessionId =
-      request.sessionId?.trim() || (liveJob?.state === "running" ? liveJob.sessionId : "");
+      normalizeOptionalString(request.sessionId) ||
+      (liveJob?.state === "running" ? liveJob.sessionId : "");
     if (!sessionId) {
       return { text: "⚙️ No active bash job." };
     }
@@ -279,7 +281,8 @@ export async function handleBashChatCommand(params: {
 
   if (request.action === "stop") {
     const sessionId =
-      request.sessionId?.trim() || (liveJob?.state === "running" ? liveJob.sessionId : "");
+      normalizeOptionalString(request.sessionId) ||
+      (liveJob?.state === "running" ? liveJob.sessionId : "");
     if (!sessionId) {
       return { text: "⚙️ No active bash job." };
     }
@@ -298,15 +301,15 @@ export async function handleBashChatCommand(params: {
       };
     }
     const pid = running.pid ?? running.child?.pid;
-    if (pid) {
-      killProcessTree(pid);
+    if (!pid) {
+      return {
+        text: `⚠️ Unable to stop bash session ${formatSessionSnippet(sessionId)} because no process ID is available. Use !poll ${sessionId} to check whether it exits on its own.`,
+      };
     }
-    markExited(running, null, "SIGKILL", "failed");
-    if (activeJob?.state === "running" && activeJob.sessionId === sessionId) {
-      activeJob = null;
-    }
+    const { killProcessTree } = await import("../../process/kill-tree.js");
+    killProcessTree(pid);
     return {
-      text: `⚙️ bash stopped (session ${formatSessionSnippet(sessionId)}).`,
+      text: `⚙️ bash stopping (session ${formatSessionSnippet(sessionId)}). Use !poll ${sessionId} to confirm exit.`,
     };
   }
 
@@ -390,7 +393,7 @@ export async function handleBashChatCommand(params: {
     };
   } catch (err) {
     activeJob = null;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = formatErrorMessage(err);
     return {
       text: [`⚠️ bash failed: ${commandText}`, formatOutputBlock(message)].join("\n"),
     };
